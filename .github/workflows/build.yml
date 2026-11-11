@@ -1,0 +1,161 @@
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # NFM targets macOS 27 on Apple silicon. GitHub's newest Apple silicon
+    # machines run macOS 26, so the shipped app is built for 27 and a second
+    # copy built for 26 is what gets launched for testing.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Select newest Xcode
+        run: |
+          ls -d /Applications/Xcode_*.app
+          # Prefer Xcode 27 when the image has it; Xcode 26.x's macOS 26 SDK
+          # also covers every API NFM uses.
+          xcode=$(ls -d /Applications/Xcode_2[6-9]*.app | sed -E 's/.*Xcode_([0-9.]+)\.app/\1 &/' | sort -V | tail -1 | cut -d' ' -f2)
+          echo "Using $xcode"
+          sudo xcode-select -s "$xcode/Contents/Developer"
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Check injected script
+        run: node --check Resources/nfm.js
+
+      - name: Type-check and surface warnings
+        run: |
+          set -o pipefail
+          xcrun swiftc -typecheck -swift-version 5 \
+            -sdk "$(xcrun --show-sdk-path)" -target arm64-apple-macos27.0 \
+            $(find Sources -name '*.swift') 2>&1 | tee typecheck.log
+          echo "warnings: $(grep -c 'warning:' typecheck.log || true)"
+          # A delegate method that only 'nearly matches' its protocol is never called.
+          if grep -E 'nearly matches|never used|will never be executed' typecheck.log; then
+            echo "::error::Found warnings that indicate real bugs"; exit 1
+          fi
+
+      - name: Build NFM.app (Apple silicon, macOS 27+)
+        run: scripts/build-app.sh
+
+      - name: Verify the shipped app
+        run: |
+          set -euo pipefail
+          lipo -archs build/NFM.app/Contents/MacOS/NFM | grep -qx arm64
+          vtool -show-build build/NFM.app/Contents/MacOS/NFM | grep -E 'minos +27\.0'
+          /usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' build/NFM.app/Contents/Info.plist | grep -qx '27.0'
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' build/NFM.app/Contents/Info.plist | grep -qx "$(cat VERSION)"
+          test -f build/NFM.app/Contents/Resources/nfm.js
+          test -f build/NFM.app/Contents/Resources/AppIcon.icns
+
+      - name: Build test copy (runs on this macOS 26 machine)
+        run: NFM_MACOS_MIN=26.0 OUT_DIR="$PWD/build-test" scripts/build-app.sh
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          # Launch the app headlessly for a few seconds; it must not crash on startup.
+          build-test/NFM.app/Contents/MacOS/NFM &
+          pid=$!
+          sleep 8
+          if ! kill -0 "$pid" 2>/dev/null; then
+            echo "NFM exited during startup"; exit 1
+          fi
+          kill "$pid"
+
+      - name: Loudness meter calibration
+        run: |
+          set -euo pipefail
+          NFM_SELFTEST_METER=1 build-test/NFM.app/Contents/MacOS/NFM | tee meter.log
+          grep '^NFM_METER ' meter.log | sed 's/^NFM_METER //' | python3 -c '
+          import json, sys
+          r = json.load(sys.stdin)
+          print(json.dumps(r, indent=2))
+          checks = {
+              "stereo48_integrated": -20.0,   # 997 Hz at -20 dBFS, both channels
+              "stereo44_integrated": -20.0,   # same at 44.1 kHz
+              "mono48_integrated": -23.01,    # one channel only
+              "stereo48_peak": -20.0,
+          }
+          bad = [f"{k}={r.get(k)} (expected {v})" for k, v in checks.items() if abs(r.get(k, 999) - v) > 0.1]
+          if r.get("stereo48_range", 99) > 0.5: bad.append("steady tone should have ~0 LU loudness range")
+          # Loudness Match: a -26 LUFS programme must be raised ~10 dB to the -16 LUFS target.
+          gain, out_lufs = r.get("match_gain_db", 0), r.get("match_output_lufs", 0)
+          if abs(gain - 10) > 0.6: bad.append("match gain %s dB, expected ~10" % gain)
+          if abs(out_lufs + 16) > 0.6: bad.append("match output %s LUFS, expected ~-16" % out_lufs)
+          # Limiter: +12 dB on a loud tone must never exceed full scale.
+          limiter_peak = r.get("limiter_output_peak", 9)
+          if limiter_peak > 1.0: bad.append("limiter let %s through" % limiter_peak)
+          # The tap must never include the NFM process itself (it would mute the output and feed back).
+          if r.get("tap_filter_ok") != 1: bad.append("tap process filter would include NFM itself or foreign processes")
+          for b in bad: print("::error::meter " + b)
+          sys.exit(1 if bad else 0)
+          '
+
+      - name: Self-test against netflix.com
+        run: |
+          set -uo pipefail
+          NFM_SELFTEST=1 build-test/NFM.app/Contents/MacOS/NFM | tee selftest.log
+          line=$(grep '^NFM_SELFTEST ' selftest.log | sed 's/^NFM_SELFTEST //')
+          echo "$line" | python3 -m json.tool
+          echo "$line" | python3 -c '
+          import json, sys
+          r = json.load(sys.stdin)
+          problems = []
+          if r.get("bridge") != "object": problems.append("page bridge (nfm.js) was not injected")
+          if "Safari/" not in r.get("userAgent", ""): problems.append("user agent does not identify as Safari")
+          if r.get("bridgeState") is not True: problems.append("bridge command round-trip failed")
+          if not r.get("fullscreenPolyfill"): problems.append("fullscreen mapping missing")
+          if not isinstance(r.get("audioInfo"), dict): problems.append("audioInfo did not return an object: " + str(r.get("audioInfo")))
+          subs = r.get("subtitles")
+          if not isinstance(subs, dict) or subs.get("on") is not True or subs.get("scale") != "0.8" or subs.get("offAgain") is not True:
+              problems.append("subtitle size setting did not apply: " + str(subs))
+          tvm = r.get("tvMode")
+          if not isinstance(tvm, dict) or tvm.get("on") is not True or not tvm.get("ring"):
+              problems.append("TV mode did not switch on: " + str(tvm))
+          elif not tvm.get("ringVisible"):
+              print("::warning::TV mode highlight not visible on the sign-in page: " + str(tvm))
+          for p in problems: print("::error::" + p)
+          if r.get("fairPlay") != "supported":
+              print("::warning::FairPlay EME reported " + str(r.get("fairPlay")) + " on this CI VM (VMs often lack it)")
+          sys.exit(1 if problems else 0)
+          '
+
+      - name: Package
+        run: |
+          echo "NFM_VERSION=$(cat VERSION)" >> "$GITHUB_ENV"
+          cd build && ditto -c -k --keepParent NFM.app "NFM-$(cat ../VERSION).zip"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: NFM-${{ env.NFM_VERSION }}
+          path: build/NFM-${{ env.NFM_VERSION }}.zip
+
+      - name: Check release tag matches VERSION
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          test "${GITHUB_REF_NAME#v}" = "$NFM_VERSION"
+          # This version's section of CHANGELOG.md becomes the release notes.
+          awk -v v="## $NFM_VERSION" '$0 == v {on = 1; next} /^## / {on = 0} on' CHANGELOG.md > RELEASE_NOTES.md
+          test -s RELEASE_NOTES.md
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: NFM ${{ env.NFM_VERSION }}
+          files: build/NFM-${{ env.NFM_VERSION }}.zip
+          body_path: RELEASE_NOTES.md

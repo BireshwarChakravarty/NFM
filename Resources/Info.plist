@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>NFM</string>
+	<key>CFBundleName</key>
+	<string>NFM</string>
+	<key>CFBundleExecutable</key>
+	<string>NFM</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>app.nfm.mac</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>__VERSION__</string>
+	<key>CFBundleVersion</key>
+	<string>__VERSION__</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>__MIN_MACOS__</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.entertainment</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>LSRequiresNativeExecution</key>
+	<true/>
+	<key>LSArchitecturePriority</key>
+	<array>
+		<string>arm64</string>
+	</array>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>NFM uses this for Loudness Match and Voice Boost, which adjust the sound of Netflix playing in NFM. Nothing is recorded or saved.</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>An unofficial Netflix client for macOS. Netflix is a trademark of Netflix, Inc.</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>app.nfm.mac.links</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>nfm</string>
+				<string>netflix</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>
